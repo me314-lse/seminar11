@@ -1,0 +1,714 @@
+---
+title: "Seminar 11: Text as Data"
+subtitle: "LSE ME314: Introduction to Data Science and Machine Learning"
+date-modified: "27 July 2025" 
+toc: true
+format: html
+execute:
+  echo: true
+  eval: false
+---
+
+## Plan for Today: 
+
+In this seminar, we will explore five key areas of working with text as data:
+
+We begin with encoding basics, understanding how text is stored as bits and why issues like garbled characters occur when different encodings (UTF‑8, UTF‑16, UTF‑32) are used.
+Next, we move to strings and regular expressions, where we learn how to manipulate text, search for patterns, and clean data using R’s stringr package.
+We then start working with with quanteda and quantifying text, turning lyrics into a structured document-feature matrix for statistical analysis.
+Building on that, we explore clustering and classifying text, comparing unsupervised (k‑means) and supervised (logistic regression with TF‑IDF) approaches to distinguish between Taylor Swift and Black Sabbath lyrics.
+We end with prompt engineering with LLMs, showing how to use the OpenAI API to interact with large language models and design prompts for structured, machine-readable outputs.
+
+Let's set up our workspace.  
+
+```{r, warning=FALSE, message=FALSE}
+# load packages
+package_check <- function(need = c()) {
+    have <- need %in% rownames(installed.packages()) # checks packages you have
+    if (any(!have)) install.packages(need[!have]) # install missing packages
+    invisible(lapply(need, library, character.only = T))
+}
+
+required_packages <- c(
+    "tidyverse",
+    "ggplot2",
+    "stringr",
+    "quanteda",
+    "quanteda.textplots",
+    "quanteda.textstats",
+    "quanteda.textmodels",
+    "tidytext",
+    "textdata",
+    "caret"
+)
+
+package_check(required_packages)
+```
+
+
+```{r}
+library(reticulate)
+#setwd("/Users/charlottekuberka/Desktop/ME314/Seminar11_ME314/")
+setwd("Your/Path/to/Seminar11")
+use_python("your/python/path", required = TRUE)
+```
+
+
+Now, we are setting up our python environment and install and import the new packages we will need for this session. 
+
+```{python}
+!pip install openai
+!pip install python-dotenv
+```
+
+
+```{python}
+# Install dependencies
+import os
+import openai
+import pandas as pd
+import matplotlib.pyplot as plt
+```
+
+
+## Part 1: Encoding 
+
+In the first part we will discuss character encoding and how to perform simple text searches in R using regular expressions.
+
+__Encoding Basics:__
+
+*To encode means to use something to represent something else. An encoding is the set of rules with which to convert something from one representation to another.*
+
+* Computers do not store letters, books or pictures $\rightarrow$ they store bits
+* Bits are the smallest unit of storage on a computer: a 0 or 1
+* __Encoding__ = the mapping between character and code points
+* Encodings use differing number of bits to represent characters:7-bit, 8-bit, 16-bit, etc.
+		
+__Bits:__
+	
+* 8 bits are 1 byte 
+* With n bits, we can store $2^n$ patterns
+* Bits represent letters and other characters using a combination of 0 and 1 based on some regulation $\rightarrow$ ASCII
+* Bits are *case-sensitive*
+* Kilobytes, megabytes, gigabytes, etc. are metric aggregations of bytes
+	
+
+__ASCII and Unicode:__
+
+* ASCII is the original character set/ encoding, only used 7 bits  and was then extended to 8 (ISO-8859-1) $\rightarrow$ $2^8$ = 256 characters 
+* __Unicode__ = UTF-8 (MacOS default) or UTF-16 (Windows)
+
+
+![](figs/ASCII%20table.png)
+
+__Mojibake__ = underlying bit sequences translated into the wrong characters $\rightarrow$ wrongly detected encoding of a text file returns gibberish
+
+
+First, let's examine how special characters can affect file size. Since `readr` encodes all text files with UTF-8, special character will require more bytes.
+
+### Exercise 1: 
+
+When a plain text file is initially saved, it has an encoding. But the encoding is not stored as metadata in plain text files.
+  
+By default `readr` will encode files it saves as UTF-8. As far as we know, you cannot choose a different encoding when you write a file in `readr` using `write_file`. For the most part, this is not only okay, it's preferable. Let's see why through some examples. 
+
+We created three files in which we wrote "&uüДሊ🫠" using different encodings:
+
+- `utf-examples-8.txt` (UTF-8): 13 bytes
+- `utf-examples-16.txt` (UTF-16): 16 bytes
+- `utf-examples-32.txt` (UTF-32): 28 bytes 
+
+Note that the UTF-32 encoded file is more than double the size of UTF-8 (just to store the same characters!). Next, let's try to open them.
+
+```{r}
+read_file("data/utf-examples-8.txt") # This works (sort of...)
+```
+
+
+```{r}
+read_file("data/utf-examples-16.txt") # This drops most of the characters
+```
+
+
+```{r}
+read_file("data/utf-examples-32.txt") # This drops most of the characters
+```
+
+
+**Questions**:
+
+- Why do so many characters disappear or get corrupted when using UTF-16 or UTF-32, compared to UTF-8? What causes this?
+
+__In case of encoding issues:__
+
+```{r}
+# For a character vector x, obtain texts assuming a different encoding with
+parse_character(x, locale = locale(encoding = "Latin1"))
+
+# or to make a guess about encoding in R
+guess_encoding(charToRaw(x))
+```
+
+
+## Part 2: R Strings and Regular Expressions: 
+
+An object consisting of plain text characters is often referred to as a string or a character string.
+
+In R, a vector of strings is a character vector; more generally, character and string are interchangeable.
+
+__String basics:__
+
+You can create strings with either single quotes or double quotes $\rightarrow$ no difference in behaviour.
+
+```{r}
+string1 <- "This is a string"
+```
+
+
+In R, we are using the `stringr`package to manipulate strings. 
+
+A useful tool to work with strings and other text data is called "regular expression". You can learn more about regular expressions [here](http://www.zytrax.com/tech/web/regex.htm). 
+
+* A regular expression is a pattern describing a certain amount of text. It is matched against a subject string from left to right. Most characters stand for themselves, and match the corresponding characters in the subject text. 
+
+* Regular expressions let us develop complicated rules for both matching strings and extracting elements from them. 
+
+__Greedy vs. Ungreedy Quantifiers__
+
+Greedy Quantifiers:
+
+* *: Matches 0 or more times, as many as possible.
+* +: Matches 1 or more times, as many as possible.
+* ?: Matches 0 or 1 time, as many as possible.
+* {n,m}: Matches between n and m times, as many as possible.
+
+Ungreedy (Lazy) Quantifiers:
+
+* *?: Matches 0 or more times, as few as possible.
+* +?: Matches 1 or more times, as few as possible.
+* ??: Matches 0 or 1 time, as few as possible.
+* {n,m}?: Matches between n and m times, as few as possible.
+
+![Source: Towards AI (https://pub.towardsai.net/regular-expression-regex-in-python-the-basics-b8f2cd041bdb)](figs/regex_visual.webp)
+
+__Tip:__ You can test your regular expression using this website: [Regex101](https://regex101.com/)
+
+### Exercise 2: 
+
+For this seminar, we are going to work with song lyrics from Taylor Swift and Black Sabbath. In your data folder for this seminar's repo you find dataset called "music.csv".[^1] Load the data, assign it to an object called "music" and inspect it. 
+
+First, let's download the file directly in R and remove all the missings.
+
+```{r, messages=FALSE, warning=FALSE}
+# your code goes here
+```
+
+Let's have a look at the text data:
+
+R stores the basic string in a character vector. `length` gets the number of items in the vector, while `nchar` is the number of characters in the vector.
+
+```{r}
+length(music$lyrics)
+music$lyrics[1]
+nchar(music$lyrics[1])
+```
+
+
+We can grab substrings with `substr`. The first argument is the string, the second is the beginning index (starting from 1), and the third is final index.
+
+```{r}
+substr(music$lyrics[1], 1, 2)
+substr(music$lyrics[1], 1, 10)
+```
+
+
+Now, let us try to find the lyrics where the words 'lover', 'love' or loved are used.
+
+```{r}
+length(grep("lover|loved|love", music$lyrics, ignore.case = TRUE))
+```
+
+
+We can also use question marks to indicate optional characters. So if we wanted to look for all words having at least the letters 'love', we would write 'love?'.
+
+```{r}
+length(grep("____", music$lyrics, ignore.case = TRUE))
+
+```
+
+
+This will match lover, love, loved, etc.
+
+To extract a pattern we can use `str_extract`, and again we can extract one or all instances of the pattern: Let us identify all sentences where Taylor or Ozzy have aksed a question in their songs and save them as a new object called `questions`.
+
+```{r}
+questions <- str_extract_all(music$lyrics, ".*\\?$")
+questions
+```
+
+
+Now, let's say that e.g. we want to replace a pattern (or a regular expression) with another string:
+
+```{r}
+music$album[10]
+str_replace(music$album[10], "(?i)^Speak Now$", "Speak Now (Taylor's Version)")
+```
+
+
+Note this will only replace the _first_ instance. For all the instances, do:
+
+```{r}
+str_replace_all(music$album, "(?i)^Speak Now$", "Speak Now (Taylor's Version)")
+```
+
+
+## Part 3: Quantifying Texts
+
+### 3.1 Preprocessing Texts
+
+As we discussed earlier, before we can do any type of automated text analysis, we will need to go through several "preprocessing" steps before it can be passed to a statistical model. We'll use the `quanteda` package  [`quanteda`](https://quanteda.io/) here.
+
+The basic unit of work for the `quanteda` package is called a `corpus`, which represents a collection of text documents with some associated metadata. Documents are the subunits of a corpus. You can use `summary` to get some information about your corpus.
+
+Quanteda identifies the text field by default as named as "text". So, we have to change this, since our text column is named "lyrics". 
+
+### Exercise 3:
+
+Create a corpus called `lyrics_corpus`using the `corpus()`function from quanteda. Make sure to name the text_field = "lyrics". Then define the docnames(lyrics_corpus) as the songtitles and print out the summary() of the first 10 observations.
+
+```{r}
+# your code goes here
+```
+
+
+In quantitative text analysis, tokens are the individual units of text that are analyzed. They are typically words, but can also be characters, n-grams (sequences of words), or other meaningful units. The process of breaking down text into these units is called tokenization, and it's a crucial first step in many computational text analysis methods. 
+
+We can tokenize the documents with the `tokens()` function. We probably also want to remove any words and symbols which are not of interest to our data. This class of words which is not relevant are called stopwords. 
+
+Clean up the formatting of these tokens: capitalisation, punctuation, junk html code, etc.
+
+```{r}
+?tokens()
+```
+
+```{r}
+toks <- lyrics_corpus %>%
+    tokens(remove_punct = TRUE) %>%
+    tokens_remove(stopwords("english"))
+toks
+```
+
+
+This returns a `tokens` object that contains a vector of tokens in each document. Many of the pre-processing steps can be done with the `tokens()` function. See the [`tokens()` documentation](https://quanteda.io/reference/tokens.html) or run `?tokens`.
+
+Let's extract n-grams. The code below will extract all combinations of one, two, and three words (e.g. it will consider both "human", "rights", and "human rights" as tokens in the matrix).
+
+```{r}
+toks_ngram <- tokens_ngrams(toks, n = 1:3)
+toks_ngram
+```
+
+To stem our documents stemming relies on the `SnowballC` package's implementation of the Porter stemmer:
+
+The SnowballC package (via the Porter stemmer) does this by:
+
+* Removing common endings (-ing, -ed, -ly, etc.).
+* Applying rules to handle plural forms and suffixes.
+* Producing a stem, which is not always a real word but helps group similar terms.
+
+```{r}
+toks_stem <- tokens_wordstem(toks_ngram)
+
+# let us look at an example from the first song:
+
+song <- tolower(music$lyrics[15])
+tokens(song)
+tokens_wordstem(tokens(song))
+```
+
+
+A very useful feature of tokens objects is _keywords in context_, which returns all the appearances of a word (or combination of words) in its immediate context.
+
+```{r}
+toks %>%
+    kwic("love", window = 10) %>%
+    .[1:5, ]
+toks %>%
+    kwic("hate", window = 10) %>%
+    .[1:5, ]
+```
+
+
+### 3.2 Creating a Document-feature matrix
+
+We can create a document-feature matrix from the tokens using the `dfm()` function.
+
+Now, use the `dfm()` function from the tokens to create a document-feature matrix and call it `lyrics_dfm` and set 'verbose=TRUE'.
+ 
+```{r}
+# your code goes here
+```
+
+The `dfm` will show the count of times each word appears in each document (song):
+
+```{r}
+lyrics_dfm[1:5, 1:10]
+```
+
+
+Let us find out how to access the dfm. First, we check the structure:
+
+* Use docnames(lyrics_dfm) to see the names of all documents.
+* Use docvars(lyrics_dfm) to see the metadata (e.g., artist, album) for each document.
+
+```{r}
+docnames(lyrics_dfm)
+docvars(lyrics_dfm)
+```
+
+
+Now, we will access specific features (words) and documents.
+
+```{r}
+
+lyrics_dfm[, 1] # accessing features
+lyrics_dfm[, "love"]
+
+
+lyrics_dfm[1, ] # accessing documents
+lyrics_dfm["Fearless.1", ] #assessing song called Fearless
+```
+
+
+In a large corpus like this, many features often only appear in one or two documents. In some case it's a good idea to remove those features, to speed up the analysis or because they're not relevant. We can `trim` the dfm:
+
+```{r}
+lyrics_dfm <- dfm_trim(lyrics_dfm, min_docfreq = 3, verbose = TRUE)
+lyrics_dfm
+```
+
+
+### 3.3. Comparing Documents: 
+
+### Exercise 4: 
+
+__Comparing Taylor Swift and Black Sabbath Lyrics:__
+
+Let us create some descriptive statistics from out dataset. We want to look at the words (features) that have been used most in Black Sabbath and Taylor Swift songs.
+We will compare the two artists’ lyrics based on the most frequent words, word clouds, and emotional tone.
+
+First, we want to group our dfm by artist:
+
+```{r}
+# Group by artist:
+artist_dfm <- dfm_group(lyrics_dfm, groups = docvars(lyrics_dfm, ______))
+```
+
+
+Next, we want to compute the top 10 most frequent words for each artist using `textstat_frequency()` and then plot the results. 
+
+```{r}
+# Get top 10 most frequent words per artist
+top_words <- textstat_frequency(artist_dfm, n = 10, groups = docnames(artist_dfm))
+
+# 6. Plot most frequent words by artist
+ggplot(top_words, aes(x = reorder(feature, frequency), y = frequency, fill = group)) +
+    geom_col(show.legend = FALSE) +
+    scale_fill_manual(values = c("black", "lightblue")) +
+    coord_flip() +
+    facet_wrap(~group, scales = "free_y") +
+    labs(
+        title = "Most Frequent Words per Artist",
+        x = "Word", y = "Frequency"
+    ) +
+    theme_bw()
+```
+
+
+Question: 
+
+* Which words dominate each artist’s lyrics? 
+
+We can see that there are still quite a few words without meaning like "gonna", "wanna", or "yeah" which have not been captured by the "english" stopwords list.
+Let us remove some of the irrelevant by assigning them to a customized stopwords vector and create a new dfm.
+
+```{r}
+custom_sw <- c(_______________)
+
+toks_clean <- tokens_remove(toks, custom_sw)
+
+lyrics_dfm_clean <- toks_clean %>%
+    dfm(verbose = TRUE)
+
+# and split by artist again
+artist_dfm_clean <- dfm_group(lyrics_dfm_clean, groups = docvars(lyrics_dfm_clean, "artist"))
+```
+
+
+```{r}
+# Plot a comparison word cloud (both artists, color-coded)
+textplot_wordcloud(
+    artist_dfm_clean,
+    comparison = TRUE,
+    color = c("black", "lightblue"),
+    max_words = 100
+)
+```
+
+
+Question:
+
+* Which artist has more diverse vocabulary?
+
+Now, we will examine the emotional tone of Taylor Swift and Black Sabbath lyrics by combining our document-feature matrix with the NRC sentiment lexicon, which categorizes words into emotions such as joy, anger, sadness, fear, and others.
+
+```{r}
+# Convert the grouped dfm into a tidy format
+artist_tidy <- tidy(artist_dfm)
+
+# Add the artist labels (they’re the document names now)
+artist_tidy <- artist_tidy %>%
+    mutate(artist = document) # since docnames are artist names
+
+# Load NRC lexicon
+nrc <- get_sentiments("nrc")
+
+# Join with sentiments, count, and normalize
+artist_sentiment <- artist_tidy %>%
+    inner_join(nrc, by = c(term = "word")) %>%
+    group_by(artist, sentiment) %>%
+    summarise(total = sum(count), .groups = "drop") %>%
+    group_by(artist) %>%
+    mutate(percentage = total / sum(total) * 100) %>%
+    ungroup()
+
+# Plot normalized sentiment distribution
+ggplot(artist_sentiment, aes(x = sentiment, y = percentage, fill = artist)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_manual(values = c("black", "lightblue")) +
+    labs(
+        title = "Normalized Emotional Tone in Lyrics by Artist",
+        x = "Emotion Category",
+        y = "Percentage of Emotion Words"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+Question:
+
+* Which emotions (joy, sadness, anger, etc.) are most common for each artist?
+* Does the emotional tone align with their typical musical style?
+
+Next, we want to compute some similarity statistics between both artists. We will calculate the cosine similarity to find out how similar the artists' vocabularies are. 
+
+```{r}
+# Cosine similarity
+textstat_simil(artist_dfm, method = "cosine")
+```
+
+
+Now, we will use k-means clustering to automatically group songs by their lyrical content, without using the artist label.
+
+* We first weight the lyrics_dfm by relative word frequency (dfm_weight("prop")) so that documents of different lengths are comparable.
+* This prevents longer songs from dominating the clustering just because they have more words.
+* We choose centers = 2 because there are two artists (Taylor Swift and Black Sabbath).
+* The algorithm tries to group the songs into two clusters based on their word usage patterns.
+* We add the cluster assignments as a new variable (docvars) so we can analyze them further.
+
+```{r}
+# Create a "cleaned" DFM for clustering
+cdfm <- lyrics_dfm_clean %>%
+    dfm_weight("prop")
+
+# Run k-means clustering (2 clusters, one for each artist)
+set.seed(1) # for reproducibility
+
+kc <- kmeans(cdfm, centers = 2)
+
+# How many songs in each cluster?
+table(kc$cluster)
+
+# Which songs ended up in cluster 1 vs 2?
+head(docnames(cdfm)[kc$cluster == 1])
+head(docnames(cdfm)[kc$cluster == 2])
+
+# Add cluster labels back to the corpus
+docvars(cdfm, "cluster") <- kc$cluster
+```
+
+
+To see why the clusters differ, we compute keyness statistics with `textstat_keyness()`.
+This tells us which words are most distinctive for each cluster (e.g., Taylor Swift might use words like "love", "night", "heart", while Black Sabbath might use "death", "fire", "evil").
+But remember: we should do a deeper qualitative examination before settling on labels for these!
+
+```{r}
+# Check which words discriminate Taylor Swift vs. Black Sabbath
+# (assuming cluster 1 is Taylor Swift; adjust target as needed)
+textstat_keyness(cdfm, target = kc$cluster == 1) %>%
+    head(n = 20) %>%
+    print()
+
+textstat_keyness(cdfm, target = kc$cluster == 2) %>%
+    head(n = 20) %>%
+    print()
+```
+
+
+Question: 
+
+* What do you see? 
+
+The textstat_keyness analysis identifies words most associated with each artist’s lyrics relative to the other. For Taylor Swift (cluster 1), the top words include conversational or narrative terms like bad, jug, take, florida, tired, hey, baby, and stranger. These words occur more often in her cluster, but none reach strong statistical significance (all chi-squared < 1, p > 0.3).
+
+For Black Sabbath (cluster 2), the most distinctive words reflect darker and thematic elements, such as evil, night, live, dead, god, darkness, fight, and eye. Again, the chi-squared values are very low, meaning no word shows strong discrimination between clusters.
+
+As a last step, we will use a supervised classification model to predict the artist for a song based on the lyrics. 
+
+We use Term Frequency–Inverse Document Frequency (TF–IDF) to transform our document-feature matrix so that common words (like “the” or “love”) are downweighted, and rarer, more informative words get more weight.
+
+* Term Frequency (TF): counts how often a word appears in a document.
+
+* Inverse Document Frequency (IDF): downweights words that appear in many documents, as they carry little discriminative power.
+
+The result helps emphasize distinctive words, making classification or clustering more accurate. After weighting our features, we can train a logistic regression model to classify each song by artist (Taylor Swift vs. Black Sabbath).
+
+```{r}
+
+# apply TF-IDF weighting
+tfidf_dfm <- lyrics_dfm_clean %>%
+    dfm_tfidf(scheme_tf = "prop", scheme_df = "inverse", base = 10)
+
+# Make sure labels (artist) exist
+artist_labels <- docvars(lyrics_dfm_clean, "artist")
+
+# split into train/test sets
+
+set.seed(42)
+train_idx <- sample(seq_len(ndoc(tfidf_dfm)), size = 0.8 * ndoc(tfidf_dfm))
+
+train_dfm <- tfidf_dfm[train_idx, ]
+test_dfm <- tfidf_dfm[-train_idx, ]
+
+train_labels <- artist_labels[train_idx]
+test_labels <- artist_labels[-train_idx]
+
+
+# Train logistic regression classifie
+model <- textmodel_lr(train_dfm, train_labels)
+
+# Predict on the test set
+preds <- predict(model, newdata = test_dfm)
+
+
+# Evaluate accuracy
+
+conf_mat <- table(Predicted = preds, Actual = test_labels)
+accuracy <- sum(diag(conf_mat)) / sum(conf_mat)
+
+print(conf_mat)
+cat("Accuracy:", round(accuracy * 100, 2), "%\n")
+
+```
+
+
+We see how our accuracy increases when using a supervised model compared to the k-means clustering. However, given that we have some class-imbalance (120 Black Sabbath songs to 80 Taylor Swift songs), the model is sadly not great at predicting Taylor Swift songs (the song lyrics are probably too complex for the model to grasp). 
+
+## Part 4: LLMs: Using Chat GPT
+
+![Source: [Medium](https://medium.com/data-science-at-microsoft/how-large-language-models-work-91c362f5b78f)](figs/GPT.webp)
+
+In this final part, we will explore how Large Language Models (LLMs)—too large to run locally—can be accessed and used via APIs (for example, from OpenAI or Hugging Face). APIs let us use these powerful models for tasks like text generation, analysis, or classification without needing extensive local computing resources.
+
+__How do LLMs work?__
+
+Remember our "words in context" example? This concept is the foundation of word embeddings, where words are represented as vectors based on their meaning and usage in context. LLMs use these embeddings as building blocks, processing them through layers of a neural network to predict the next word, summarize text, or answer questions.
+Through their massive training on billions of words, they learn relationships between words, phrases, and concepts.
+
+__Pretraining and Prediction__
+
+ Training of the LLM currently starts with a so-called pretraining stage, where the model is trained on very large amounts of curated internet text data to predict the next token. Conceptually, predicting the next token is a classification problem and the loss function that is minimised with gradient descent is the cross-entropy loss.
+
+__Generative Nature of LLMs__
+
+LLMs are called generative models because they don’t just classify or rank words—they generate text step by step. This process is called autoregressive generation, where each new token depends on all previous tokens.
+
+The function $Pr(x_{T+1}|x_T,...,x_1)$ means: What is the probability of the next token $x$ (a word or subword) given all the previous tokens $x_T,x_{T-1},...,x_1$.
+The model computes this probability distribution for every possible token in its vocabulary (often 50k+ tokens). It then picks one (or samples from the distribution) to generate the next token.
+
+![Source: Own Image but adapted from [Medium:](https://medium.com/data-science-at-microsoft/how-large-language-models-work-91c362f5b78f)](figs/chatgpt.png)
+
+
+### Exercise 5:
+
+First, we have to create an API key to work with the OpenAI API.
+
+### 5.1 Get an API Key
+   
+* Go to https://platform.openai.com.
+* Create a free account or log into your account(students can use a free tier — it gives credits).
+* Go to your profile (right top of the page) and go to User API keys and copy your key.
+* Create a .txt file called "api.txt" and store it in your seminar 11 folder
+
+First, let us read in the api.tex file into python so that we are able to load API key without displaying it in code: DO NOT HARDCODE YOUR API KEY !!
+
+```{python}
+# Read the API key from the file
+with open("api.txt", "r") as f:
+    api_key = f.read().strip()  # Remove any extra spaces or newlines
+
+print(api_key)
+```
+
+
+### 5.2 Connect to OpenAI API.
+
+We will connect to the OpenAI API and ask Chat GPT to generate a response. 
+First, we create a client to connect to OpenAI's servers using your personal API key for authentication. 
+We specify our model to be "gpt-4o-mini" and then you can write your own prompt into 'input'. 
+
+```{python}
+
+from openai import OpenAI
+
+client = OpenAI(
+  api_key="YOUR_KEY"
+)
+
+response = client.responses.create(
+    model="gpt-4o-mini",
+    input="Give me one fun fact comparing Taylor Swift and Black Sabbath."
+)
+
+print(response.output_text)
+```
+
+Now, we engineer the prompt to force a JSON-style output so it’s easier to use for later work:
+
+```{python}
+response = client.responses.create(
+    model="gpt-4o-mini",
+    input=(
+        "Compare Taylor Swift and Black Sabbath lyrics. "
+        "Return your answer as a JSON object with three keys: "
+        "`themes`, `tone`, and `notable_words`, each containing a list of strings."
+    )
+)
+print("Structured output:\n", response.output_text)
+```
+
+
+This shows you how to use prompt engineering when interacting with ChatGPT or other GenAI models. 
+
+## By the end of this seminar you should be able to…
+
+* Read, detect, and fix encoding issues in text files.
+* Manipulate and extract patterns from text using stringr and regular expressions.
+* Quantify and compare text corpora using quanteda.
+* Perform clustering and classification of texts, understanding strengths and weaknesses of each.
+* Interact with a Large Language Model (LLM) via the OpenAI API and design prompts for structured outputs.
+
+
+
+[^1]: The lyrics and albums were scraped using the Genius API. You can find information on it here: https://docs.genius.com/
